@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,8 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/gorilla/websocket"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 type UserCredential struct {
@@ -27,6 +26,9 @@ type UserCredential struct {
 }
 
 func main() {
+	// Initialize FoundationDB
+	fdb.APIVersion(730)
+	db := fdb.MustOpenDefault()
 
 	// Start the Hello World API
 	http.HandleFunc("/", helloHandler)
@@ -39,38 +41,24 @@ func main() {
 
 	log.Println("\033[1;34mStarting Slack sign-in process\033[0m")
 
-	// Open SQLite database
-	db, err := sql.Open("sqlite3", "./slack_users.db")
-	if err != nil {
-		log.Fatalf("\033[1;31mError opening database: %v\033[0m", err)
-	}
-	defer db.Close()
-
-	// Create table if not exists
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS users (
-		email TEXT PRIMARY KEY,
-		api_token TEXT
-	)`)
-	if err != nil {
-		log.Fatalf("\033[1;31mError creating table: %v\033[0m", err)
-	}
-
 	// List all created users
-	rows, err := db.Query("SELECT email, api_token FROM users")
-	if err != nil {
-		log.Fatalf("\033[1;31mError querying users: %v\033[0m", err)
-	}
-	defer rows.Close()
-
-	log.Println("\033[1;32mExisting users:\033[0m")
-	for rows.Next() {
-		var user UserCredential
-		err := rows.Scan(&user.Email, &user.APIToken)
-		if err != nil {
-			log.Printf("\033[1;31mError scanning row: %v\033[0m", err)
-			continue
+	_, err := db.ReadTransact(func(tr fdb.ReadTransaction) (interface{}, error) {
+		log.Println("\033[1;32mExisting users:\033[0m")
+		kr := tr.GetRange(fdb.KeyRange{Begin: fdb.Key("user_"), End: fdb.Key("user_\xFF")}, fdb.RangeOptions{})
+		iter := kr.Iterator()
+		for iter.Advance() {
+			kv := iter.MustGet()
+			var user UserCredential
+			if err := json.Unmarshal(kv.Value, &user); err != nil {
+				log.Printf("\033[1;31mError unmarshaling user: %v\033[0m", err)
+				continue
+			}
+			log.Printf("\033[1;36mEmail: %s, API Token: %s\033[0m", user.Email, user.APIToken)
 		}
-		log.Printf("\033[1;36mEmail: %s, API Token: %s\033[0m", user.Email, user.APIToken)
+		return nil, nil
+	})
+	if err != nil {
+		log.Fatalf("\033[1;31mError listing users: %v\033[0m", err)
 	}
 
 	// Ask user if they want to create a new user
@@ -125,7 +113,7 @@ func main() {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Print("\033[1;32mEnter the verification code sent to your email: \033[0m")
 		confirmationCode, _ := reader.ReadString('\n')
-		confirmationCode = confirmationCode[:len(confirmationCode)-1] // Remove newline character
+		confirmationCode = strings.TrimSpace(confirmationCode) // Remove newline character
 		log.Printf("\033[1;36mUsing confirmation code: %s\033[0m", confirmationCode)
 		// Confirm verification code
 		signInURL := fmt.Sprintf("%s/signin.confirmCode", baseURL)
@@ -200,8 +188,16 @@ func main() {
 				log.Fatalf("\033[1;31mFailed to get API token from create user response\033[0m")
 			}
 
-			// Store user credentials in SQLite
-			_, err = db.Exec("INSERT INTO users (email, api_token) VALUES (?, ?)", email, apiToken)
+			// Store user credentials in FoundationDB
+			_, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+				key := fdb.Key(fmt.Sprintf("user_%s", email))
+				value, err := json.Marshal(UserCredential{Email: email, APIToken: apiToken})
+				if err != nil {
+					return nil, err
+				}
+				tr.Set(key, value)
+				return nil, nil
+			})
 			if err != nil {
 				log.Printf("\033[1;31mError storing user credentials: %v\033[0m", err)
 			} else {
@@ -265,24 +261,31 @@ func main() {
 			log.Printf("\033[1;31mError details: %+v\033[0m", result)
 		}
 	}
-
 	// Retrieve all saved users
-	rows, err = db.Query("SELECT email, api_token FROM users")
+	var users []UserCredential
+	_, err = db.ReadTransact(func(tr fdb.ReadTransaction) (interface{}, error) {
+		log.Println("\033[1;32mExisting users:\033[0m")
+		kr := tr.GetRange(fdb.KeyRange{Begin: fdb.Key("user_"), End: fdb.Key("user_\xFF")}, fdb.RangeOptions{})
+		iter := kr.Iterator()
+		for iter.Advance() {
+			kv := iter.MustGet()
+			var user UserCredential
+			if err := json.Unmarshal(kv.Value, &user); err != nil {
+				log.Printf("\033[1;31mError unmarshaling user: %v\033[0m", err)
+				continue
+			}
+			log.Printf("\033[1;36mEmail: %s, API Token: %s\033[0m", user.Email, user.APIToken)
+			users = append(users, user)
+		}
+		return nil, nil
+	})
 	if err != nil {
-		log.Fatalf("\033[1;31mError querying users: %v\033[0m", err)
+		log.Fatalf("\033[1;31mError listing users: %v\033[0m", err)
 	}
-	defer rows.Close()
 
 	var wg sync.WaitGroup
 
-	for rows.Next() {
-		var user UserCredential
-		err := rows.Scan(&user.Email, &user.APIToken)
-		if err != nil {
-			log.Printf("\033[1;31mError scanning row: %v\033[0m", err)
-			continue
-		}
-
+	for _, user := range users {
 		wg.Add(1)
 		go func(email, apiToken string) {
 			defer wg.Done()
