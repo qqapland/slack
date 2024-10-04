@@ -12,3 +12,16 @@ guide:
 - https://github.com/apple/foundationdb/releases/tag/7.3.26 install
 - maybe just run it on the cloud directly, simpler fdb usage.
 - actually try installing the language bindings from the package source. release
+./install_fdb_go  install --fdbver 7.3.26      
+
+
+The FoundationDB go bindings were successfully installed.
+To build packages which use the go bindings, you will need to
+set the following environment variables:
+   CGO_CPPFLAGS="-I/home/a/go/src/github.com/apple/foundationdb/bindings/c"
+   CGO_CFLAGS="-g -O2"
+   CGO_LDFLAGS="-L/usr/lib"
+
+
+cp /usr/include/foundationdb/fdb_c_apiversion.g.h /home/a/go/src/github.com/apple/foundationdb/bindings/c/foundationdb/
+cp /usr/include/foundationdb/fdb_c_options.g.h /home/a/go/src/github.com/apple/foundationdb/bindings/c/foundationdb/
