@@ -25,6 +25,14 @@ type UserCredential struct {
 	APIToken string
 }
 
+type VerificationCode struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+var verificationCodes = make(map[string]string)
+var verificationCodesMutex sync.Mutex
+
 func main() {
 	// Initialize FoundationDB
 	fdb.APIVersion(730)
@@ -32,10 +40,11 @@ func main() {
 
 	// Start the Hello World API
 	http.HandleFunc("/", helloHandler)
-	log.Println("\033[1;34mStarting Hello World API on :8009\033[0m")
+	http.HandleFunc("/webhook", webhookHandler)
+	log.Println("\033[1;34mStarting Hello World API and Webhook on :8009\033[0m")
 	go func() {
 		if err := http.ListenAndServe(":8009", nil); err != nil {
-			log.Fatalf("\033[1;31mError starting Hello World API: %v\033[0m", err)
+			log.Fatalf("\033[1;31mError starting server: %v\033[0m", err)
 		}
 	}()
 
@@ -72,7 +81,7 @@ func main() {
 		source := rand.NewSource(time.Now().UnixNano())
 		r := rand.New(source)
 		randomNum := r.Intn(100000000)
-		email := fmt.Sprintf("users+%08d@slack.adi.fr.eu.org ", randomNum)
+		email := fmt.Sprintf("users+%08d@tgopi.com", randomNum) // Using tgopi.com for testing.
 		workspace := "dogcattalk" // Replace with actual workspace name
 		log.Printf("\033[1;36mUsing email: %s for workspace: %s\033[0m", email, workspace)
 
@@ -109,12 +118,23 @@ func main() {
 		cookies = updateCookies(cookies, resp.Cookies())
 		logResponse("Email confirmation", resp)
 
-		// Prompt user for verification code
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("\033[1;32mEnter the verification code sent to your email: \033[0m")
-		confirmationCode, _ := reader.ReadString('\n')
-		confirmationCode = strings.TrimSpace(confirmationCode) // Remove newline character
-		log.Printf("\033[1;36mUsing confirmation code: %s\033[0m", confirmationCode)
+		// Wait for verification code
+		log.Printf("\033[1;32mWaiting for verification code for email: %s\033[0m", email)
+		var confirmationCode string
+		for {
+			verificationCodesMutex.Lock()
+			code, exists := verificationCodes[email]
+			if exists {
+				confirmationCode = code
+				delete(verificationCodes, email)
+				verificationCodesMutex.Unlock()
+				break
+			}
+			verificationCodesMutex.Unlock()
+			time.Sleep(1 * time.Second)
+		}
+		log.Printf("\033[1;36mReceived confirmation code: %s\033[0m", confirmationCode)
+
 		// Confirm verification code
 		signInURL := fmt.Sprintf("%s/signin.confirmCode", baseURL)
 		signInData := url.Values{}
@@ -298,6 +318,29 @@ func main() {
 
 func helloHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello, World!")
+}
+
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var verificationCode VerificationCode
+	err := json.NewDecoder(r.Body).Decode(&verificationCode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	verificationCodesMutex.Lock()
+	verificationCodes[verificationCode.Email] = verificationCode.Code
+	verificationCodesMutex.Unlock()
+
+	log.Printf("\033[1;32mReceived verification code for email %s: %s\033[0m", verificationCode.Email, verificationCode.Code)
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Verification code received")
 }
 
 func sendRequest(method, url string, data url.Values, cookies []*http.Cookie) (*http.Response, error) {

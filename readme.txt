@@ -8,6 +8,8 @@ todo?
 - use fal for ultra fast image generation https://fal.ai/pricing
 
 
+- Setup caddy server to run the email worker, doesn't work directly.
+
 guide:
 - https://github.com/apple/foundationdb/releases/tag/7.3.26 install
 - maybe just run it on the cloud directly, simpler fdb usage.
