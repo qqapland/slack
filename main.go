@@ -46,7 +46,7 @@ var verificationCodesMutex sync.Mutex
 
 func init() {
 	// Set up logging to file
-	// Use ANSI Colors https://marketplace.cursorapi.com/items?itemName=iliazeus.vscode-ansi 
+	// Use ANSI Colors iliazeus.vscode-ansi 
 	// or the "cat app.log.ansi" command to view the colorized logs
 	logFile, err := os.OpenFile("app.log.ansi", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
