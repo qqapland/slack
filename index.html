@@ -12,12 +12,12 @@
             padding: 40px;
             line-height: 1.6;
         }
-        form {
+        form, .debug-info {
             display: flex;
             flex-direction: column;
             max-width: 400px;
         }
-        input, button {
+        input, button, .debug-field {
             margin: 10px 0;
             padding: 12px;
             border-radius: 8px;
@@ -39,12 +39,15 @@
         button:hover {
             background-color: #b8bb26;
         }
-        #result {
+        #result, .debug-info {
             margin-top: 20px;
             padding: 15px;
             border-radius: 8px;
             background-color: #3c3836;
             font-family: 'Fira Code', monospace;
+        }
+        .debug-field {
+            background-color: #504945;
         }
     </style>
 </head>
@@ -55,19 +58,84 @@
         <input type="text" id="name" name="name" placeholder="Your Name" required>
         <input type="text" id="appearance" name="appearance" placeholder="Appearance" required>
         <input type="text" id="system" name="system" placeholder="System" required>
+        <input type="text" id="slackUrl" name="slackUrl" placeholder="Slack URL (e.g., https://app.slack.com/client/T07Q4VBFFHP/D07PS6JMF8B)" required>
         <button type="submit">Submit</button>
     </form>
+    <div class="debug-info">
+        <h2>Debug Information</h2>
+        <div class="debug-field" id="fullUrl"></div>
+        <div class="debug-field" id="teamId"></div>
+        <div class="debug-field" id="primaryUserId"></div>
+        <div class="debug-field" id="workspace"></div>
+        <div class="debug-field" id="sharedInvite"></div>
+    </div>
     <pre id="result"></pre>
 
     <script>
+        function updateDebugInfo() {
+            const slackUrl = document.getElementById('slackUrl').value;
+            document.getElementById('fullUrl').textContent = `Full URL: ${slackUrl}`;
+
+            const regex = /app\.slack\.com\/client\/([A-Z0-9]+)\/([A-Z0-9]+)/;
+            const match = slackUrl.match(regex);
+
+            let teamId = 'Not found';
+            let primaryUserId = 'Not found';
+
+            if (match) {
+                teamId = match[1];
+                primaryUserId = match[2];
+            }
+
+            document.getElementById('teamId').textContent = `Team ID: ${teamId}`;
+            document.getElementById('primaryUserId').textContent = `Primary User ID: ${primaryUserId}`;
+        }
+
+        function parseInviteUrl(inviteUrl) {
+            const regex = /join\.slack\.com\/t\/([^/]+)\/shared_invite\/(.+)/;
+            const match = inviteUrl.match(regex);
+            if (match) {
+                return {
+                    workspace: match[1],
+                    sharedInvite: match[2]
+                };
+            }
+            return null;
+        }
+
+        document.getElementById('slackUrl').addEventListener('input', updateDebugInfo);
+        document.getElementById('invite').addEventListener('input', function() {
+            const inviteUrl = this.value;
+            const parsedInvite = parseInviteUrl(inviteUrl);
+            if (parsedInvite) {
+                document.getElementById('workspace').textContent = `Workspace: ${parsedInvite.workspace}`;
+                document.getElementById('sharedInvite').textContent = `Shared Invite: ${parsedInvite.sharedInvite}`;
+            } else {
+                document.getElementById('workspace').textContent = 'Workspace: Invalid URL';
+                document.getElementById('sharedInvite').textContent = 'Shared Invite: Invalid URL';
+            }
+        });
+
         document.getElementById('slackInviteForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
+            const slackUrl = document.getElementById('slackUrl').value;
+            const urlParts = slackUrl.split('/');
+            const teamId = urlParts[urlParts.length - 2];
+            const primaryUserId = urlParts[urlParts.length - 1];
+
+            const inviteUrl = document.getElementById('invite').value;
+            const parsedInvite = parseInviteUrl(inviteUrl);
+
             const formData = {
-                invite: document.getElementById('invite').value,
+                invite: inviteUrl,
                 name: document.getElementById('name').value,
                 appearance: document.getElementById('appearance').value,
-                system: document.getElementById('system').value
+                system: document.getElementById('system').value,
+                team: teamId,
+                primaryUser: primaryUserId,
+                workspace: parsedInvite ? parsedInvite.workspace : '',
+                sharedInvite: parsedInvite ? parsedInvite.sharedInvite : ''
             };
 
             fetch('/invite', {
@@ -79,10 +147,10 @@
             })
             .then(response => response.text())
             .then(data => {
-                document.getElementById('result').textContent = data;
+                document.getElementById('result').textContent = `API Response: ${data}`;
             })
             .catch((error) => {
-                document.getElementById('result').textContent = 'Error: ' + error;
+                document.getElementById('result').textContent = `Error: ${error}`;
             });
         });
     </script>

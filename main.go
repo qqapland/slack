@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"regexp"
+	// "regexp"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/gorilla/websocket"
@@ -32,10 +32,13 @@ type VerificationCode struct {
 }
 
 type SlackInvite struct {
-	Invite string `json:"invite"`
+	Workspace  string `json:"workspace"`
+	InviteCode string `json:"invite_code"`
 	Name       string `json:"name"`
 	Appearance string `json:"appearance"`
-	System string `json:"system"`
+	System     string `json:"system"`
+	Team       string `json:"team"`
+	PrimaryUser string `json:"user"`
 }
 
 var verificationCodes = make(map[string]string)
@@ -43,63 +46,37 @@ var verificationCodesMutex sync.Mutex
 
 func slackInviteHandler(db fdb.Database) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var slackInvite SlackInvite
-	err := json.NewDecoder(r.Body).Decode(&slackInvite)
-	if err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Validate and extract information from the invite URL using regex
-	inviteRegex := regexp.MustCompile(`^https://join\.slack\.com/t/([^/]+)/shared_invite/(.+)$`)
-	matches := inviteRegex.FindStringSubmatch(slackInvite.Invite)
-	if matches == nil {
-		http.Error(w, "Invalid Slack invite URL format. The URL should be in the form 'https://join.slack.com/t/[workspace]/shared_invite/[invite_code]'", http.StatusBadRequest)
-		return
-	}
-
-	workspace := matches[1]
-	inviteCode := matches[2]
-
-	// Create a struct to store all relevant information
-	workspaceInfo := struct {
-		Workspace  string `json:"workspace"`
-		InviteCode string `json:"invite_code"`
-		Name       string `json:"name"`
-		Appearance string `json:"appearance"`
-		System     string `json:"system"`
-	}{
-		Workspace:  workspace,
-		InviteCode: inviteCode,
-		Name:       slackInvite.Name,
-		Appearance: slackInvite.Appearance,
-		System:     slackInvite.System,
-	}
-	// Store the invite details in the database
-	_, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-		workspaceKey := fdb.Key(fmt.Sprintf("workspace_%s", workspace))
-		workspaceData, err := json.Marshal(workspaceInfo)
-		if err != nil {
-			return nil, fmt.Errorf("error marshaling workspace data: %v", err)
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
-		tr.Set(workspaceKey, workspaceData)
-		return nil, nil
-	})
 
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error storing workspace data: %v", err), http.StatusInternalServerError)
-		return
+		var slackInvite SlackInvite
+		err := json.NewDecoder(r.Body).Decode(&slackInvite)
+		if err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Store the invite details in the database
+		_, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+			workspaceKey := fdb.Key(fmt.Sprintf("workspace_%s", slackInvite.Workspace))
+			workspaceData, err := json.Marshal(slackInvite)
+			if err != nil {
+				return nil, fmt.Errorf("error marshaling workspace data: %v", err)
+			}
+			tr.Set(workspaceKey, workspaceData)
+			return nil, nil
+		})
+
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error storing workspace data: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Slack invite processed and stored successfully for workspace: %s", slackInvite.Workspace)
 	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Slack invite processed and stored successfully for workspace: %s", workspace)
-	}
-
 }
 
 func main() {
@@ -129,7 +106,13 @@ func main() {
 	answer = strings.TrimSpace(strings.ToLower(answer))
 
 	if answer == "y" || answer == "yes" {
-		createNewUser(db)
+		// Use the credentials already present in main
+		email := fmt.Sprintf("users+%08d@tgopi.com", rand.Intn(100000000))
+		workspace := "dogcattalk"
+		sharedInviteCode := "zt-2rggdrx7r-gPbD08EqfwfhjluP0B4jNQ"
+		team := "T07Q4VBFFHP"
+		fullName := generateFullName(rand.Intn(100000000))
+		createNewUser(db, email, workspace, sharedInviteCode, team, fullName)
 	}
 
 	users := retrieveAllUsers(db)
@@ -168,12 +151,7 @@ func listExistingUsers(db fdb.Database) {
 	}
 }
 
-func createNewUser(db fdb.Database) {
-	source := rand.NewSource(time.Now().UnixNano())
-	r := rand.New(source)
-	randomNum := r.Intn(100000000)
-	email := fmt.Sprintf("users+%08d@tgopi.com", randomNum) // Using tgopi.com for testing.
-	workspace := "dogcattalk" // Replace with actual workspace name
+func createNewUser(db fdb.Database, email, workspace, sharedInviteCode, team, fullName string) {
 	log.Printf("\033[1;36mUsing email: %s for workspace: %s\033[0m", email, workspace)
 
 	// Base URL for Slack API
@@ -187,9 +165,7 @@ func createNewUser(db fdb.Database) {
 	confirmationCode := waitForVerificationCode(email)
 	cookies = confirmVerificationCode(baseURL, email, confirmationCode, cookies)
 
-	fullName := generateFullName(randomNum)
-
-	apiToken := createSlackUser(baseURL, fullName, cookies)
+	apiToken := createSlackUser(baseURL, fullName, workspace, sharedInviteCode, team, cookies)
 
 	storeUserCredentials(db, email, apiToken)
 
@@ -273,8 +249,8 @@ func generateFullName(randomNum int) string {
 	return fullName
 }
 
-func createSlackUser(baseURL, fullName string, cookies []*http.Cookie) string {
-	createUserURL := "https://dogcattalk.slack.com/api/signup.createUser"
+func createSlackUser(baseURL, fullName, workspace, sharedInviteCode, team string, cookies []*http.Cookie) string {
+	createUserURL := fmt.Sprintf("https://%s.slack.com/api/signup.createUser", workspace)
 	createUserData := url.Values{}
 	createUserData.Set("code", "")
 	createUserData.Set("display_name", fullName)
@@ -283,8 +259,8 @@ func createSlackUser(baseURL, fullName string, cookies []*http.Cookie) string {
 	createUserData.Set("last_tos_acknowledged", "tos_mar2018")
 	createUserData.Set("locale", "en-GB")
 	createUserData.Set("real_name", fullName)
-	createUserData.Set("shared_invite_code", "zt-2rggdrx7r-gPbD08EqfwfhjluP0B4jNQ")
-	createUserData.Set("team", "T07Q4VBFFHP")
+	createUserData.Set("shared_invite_code", sharedInviteCode)
+	createUserData.Set("team", team)
 	createUserData.Set("tz", "America/Los_Angeles")
 
 	log.Printf("\033[1;33mCreating user at: %s\033[0m", createUserURL)
