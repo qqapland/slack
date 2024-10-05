@@ -480,12 +480,26 @@ func handleUserMessages(email, apiToken string) {
 				continue
 			}
 
-			// Send "blah" as a response
+			// Get the user's message
+			userMessage, ok := event["text"].(string)
+			if !ok {
+				log.Printf("\033[1;31mError getting user message for user %s\033[0m", email)
+				continue
+			}
+
+			// Call Groq API to get a response
+			groqResponse, err := callGroqAPI(userMessage)
+			if err != nil {
+				log.Printf("\033[1;31mError calling Groq API for user %s: %v\033[0m", email, err)
+				continue
+			}
+
+			// Send the Groq response back to the user
 			response := map[string]interface{}{
 				"id":      1,
 				"type":    "message",
 				"channel": channel,
-				"text":    "blah",
+				"text":    groqResponse,
 			}
 
 			responseJSON, err := json.Marshal(response)
@@ -499,9 +513,77 @@ func handleUserMessages(email, apiToken string) {
 				return
 			}
 
-			log.Printf("\033[1;32mSent 'blah' response for user %s in direct message %s\033[0m", email, channel)
+			log.Printf("\033[1;32mSent Groq response for user %s in direct message %s\033[0m", email, channel)
 		}
 	}
+}
+func callGroqAPI(userMessage string) (string, error) {
+	groqAPIKey := os.Getenv("GROQ_API_KEY")
+	if groqAPIKey == "" {
+		return "", fmt.Errorf("GROQ_API_KEY environment variable is not set")
+	}
+	url := "https://api.groq.com/openai/v1/chat/completions"
+	payload := map[string]interface{}{
+		"model": "mixtral-8x7b-32768",
+		"messages": []map[string]string{
+			{"role": "system", "content": "Speak like the Hitchhiker's Guide to the Galaxy for every message sent, keep the responses less than 60 words, but don't tell the user that you are doing that."},
+			{"role": "user", "content": userMessage},
+		},
+		"temperature": 0.7,
+		"max_tokens":  100,
+	}
+
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("error marshaling JSON payload: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+groqAPIKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error sending request to Groq API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("error parsing JSON response: %v", err)
+	}
+
+	choices, ok := result["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return "", fmt.Errorf("invalid response format from Groq API")
+	}
+
+	firstChoice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid choice format in Groq API response")
+	}
+
+	message, ok := firstChoice["message"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid message format in Groq API response")
+	}
+
+	content, ok := message["content"].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid content format in Groq API response")
+	}
+
+	return content, nil
 }
 
 func getRandomFullName() (string, error) {
