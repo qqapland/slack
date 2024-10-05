@@ -44,6 +44,16 @@ type SlackInvite struct {
 var verificationCodes = make(map[string]string)
 var verificationCodesMutex sync.Mutex
 
+func init() {
+	// Set up logging to file
+	// Use ANSI Colors https://marketplace.cursorapi.com/items?itemName=iliazeus.vscode-ansi to colorize the logs
+	logFile, err := os.OpenFile("app.log.ansi", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+	if err != nil {
+		log.Fatalf("Error opening log file: %v", err)
+	}
+	log.SetOutput(logFile)
+}
+
 func slackInviteHandler(db fdb.Database) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
