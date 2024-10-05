@@ -1,49 +1,49 @@
-name: Upload & Deploy
-on:
-  push:
-    branches:
-      - master
-      - mainline
-      - main
+# name: Upload & Deploy
+# on:
+#   push:
+#     branches:
+#       - master
+#       - mainline
+#       - main
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    concurrency: upload-deploy-group
-    steps:
-      - uses: actions/checkout@v4
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+#     concurrency: upload-deploy-group
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'  # Adjust this to your Go version
+#       - name: Set up Go
+#         uses: actions/setup-go@v4
+#         with:
+#           go-version: '1.21'  # Adjust this to your Go version
 
-      - name: Build binary
-        run: go build -o slack_binary main.go
+#       - name: Build binary
+#         run: go build -o slack_binary main.go
 
-      - name: Create deploy script
-        run: |
-          cat << EOF > deploy.sh
-          #!/bin/bash
-          GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./slack_binary
-          EOF
-          chmod +x deploy.sh
+#       - name: Create deploy script
+#         run: |
+#           cat << EOF > deploy.sh
+#           #!/bin/bash
+#           GROQ_API_KEY=${{ secrets.GROQ_API_KEY }} ./slack_binary
+#           EOF
+#           chmod +x deploy.sh
 
-      - name: Upload binary and deploy script
-        uses: appleboy/scp-action@v0.1.4
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: a
-          key: ${{ secrets.SERVER_RSA_PRIV_KEY }}
-          source: "slack_binary,deploy.sh"
-          target: "/home/a"
+#       - name: Upload binary and deploy script
+#         uses: appleboy/scp-action@v0.1.4
+#         with:
+#           host: ${{ secrets.SERVER_IP }}
+#           username: a
+#           key: ${{ secrets.SERVER_RSA_PRIV_KEY }}
+#           source: "slack_binary,deploy.sh"
+#           target: "/home/a"
 
-      - name: Run deploy script
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: a
-          key: ${{ secrets.SERVER_RSA_PRIV_KEY }}
-          script: |
-            cd /home/a
-            ./deploy.sh ${{ secrets.GROQ_API_KEY }}
+#       - name: Run deploy script
+#         uses: appleboy/ssh-action@v1.0.3
+#         with:
+#           host: ${{ secrets.SERVER_IP }}
+#           username: a
+#           key: ${{ secrets.SERVER_RSA_PRIV_KEY }}
+#           script: |
+#             cd /home/a
+#             ./deploy.sh ${{ secrets.GROQ_API_KEY }}
