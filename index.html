@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slack Invite Form</title>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: #282828;
+            color: #ebdbb2;
+            padding: 40px;
+            line-height: 1.6;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            max-width: 400px;
+        }
+        input, button {
+            margin: 10px 0;
+            padding: 12px;
+            border-radius: 8px;
+            border: none;
+            background-color: #3c3836;
+            color: #ebdbb2;
+            font-size: 16px;
+        }
+        input:focus {
+            outline: none;
+            box-shadow: 0 0 0 2px #d79921;
+        }
+        button {
+            background-color: #98971a;
+            color: #282828;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #b8bb26;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            background-color: #3c3836;
+            font-family: 'Fira Code', monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>Slack Invite Form</h1>
+    <form id="slackInviteForm">
+        <input type="text" id="invite" name="invite" placeholder="Slack Invite URL" required>
+        <input type="text" id="name" name="name" placeholder="Your Name" required>
+        <input type="text" id="appearance" name="appearance" placeholder="Appearance" required>
+        <input type="text" id="system" name="system" placeholder="System" required>
+        <button type="submit">Submit</button>
+    </form>
+    <pre id="result"></pre>
+
+    <script>
+        document.getElementById('slackInviteForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = {
+                invite: document.getElementById('invite').value,
+                name: document.getElementById('name').value,
+                appearance: document.getElementById('appearance').value,
+                system: document.getElementById('system').value
+            };
+
+            fetch('/invite', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(formData),
+            })
+            .then(response => response.text())
+            .then(data => {
+                document.getElementById('result').textContent = data;
+            })
+            .catch((error) => {
+                document.getElementById('result').textContent = 'Error: ' + error;
+            });
+        });
+    </script>
+</body>
+</html>

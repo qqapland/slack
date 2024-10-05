@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"regexp"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/gorilla/websocket"
@@ -30,8 +31,76 @@ type VerificationCode struct {
 	Code  string `json:"code"`
 }
 
+type SlackInvite struct {
+	Invite string `json:"invite"`
+	Name       string `json:"name"`
+	Appearance string `json:"appearance"`
+	System string `json:"system"`
+}
+
 var verificationCodes = make(map[string]string)
 var verificationCodesMutex sync.Mutex
+
+func slackInviteHandler(db fdb.Database) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var slackInvite SlackInvite
+	err := json.NewDecoder(r.Body).Decode(&slackInvite)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate and extract information from the invite URL using regex
+	inviteRegex := regexp.MustCompile(`^https://join\.slack\.com/t/([^/]+)/shared_invite/(.+)$`)
+	matches := inviteRegex.FindStringSubmatch(slackInvite.Invite)
+	if matches == nil {
+		http.Error(w, "Invalid Slack invite URL format. The URL should be in the form 'https://join.slack.com/t/[workspace]/shared_invite/[invite_code]'", http.StatusBadRequest)
+		return
+	}
+
+	workspace := matches[1]
+	inviteCode := matches[2]
+
+	// Create a struct to store all relevant information
+	workspaceInfo := struct {
+		Workspace  string `json:"workspace"`
+		InviteCode string `json:"invite_code"`
+		Name       string `json:"name"`
+		Appearance string `json:"appearance"`
+		System     string `json:"system"`
+	}{
+		Workspace:  workspace,
+		InviteCode: inviteCode,
+		Name:       slackInvite.Name,
+		Appearance: slackInvite.Appearance,
+		System:     slackInvite.System,
+	}
+	// Store the invite details in the database
+	_, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		workspaceKey := fdb.Key(fmt.Sprintf("workspace_%s", workspace))
+		workspaceData, err := json.Marshal(workspaceInfo)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling workspace data: %v", err)
+		}
+		tr.Set(workspaceKey, workspaceData)
+		return nil, nil
+	})
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error storing workspace data: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Slack invite processed and stored successfully for workspace: %s", workspace)
+	}
+
+}
 
 func main() {
 	// Initialize FoundationDB
@@ -41,6 +110,7 @@ func main() {
 	// Start the Hello World API
 	http.HandleFunc("/", helloHandler)
 	http.HandleFunc("/webhook", webhookHandler)
+	http.HandleFunc("/invite", slackInviteHandler(db))
 	log.Println("\033[1;34mStarting Hello World API and Webhook on :8009\033[0m")
 	go func() {
 		if err := http.ListenAndServe(":8009", nil); err != nil {
@@ -50,7 +120,34 @@ func main() {
 
 	log.Println("\033[1;34mStarting Slack sign-in process\033[0m")
 
-	// List all created users
+	listExistingUsers(db)
+
+	// Ask user if they want to create a new user
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("\033[1;32mDo you want to create a new user? (y/n): \033[0m")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	if answer == "y" || answer == "yes" {
+		createNewUser(db)
+	}
+
+	users := retrieveAllUsers(db)
+
+	var wg sync.WaitGroup
+
+	for _, user := range users {
+		wg.Add(1)
+		go func(email, apiToken string) {
+			defer wg.Done()
+			handleUserMessages(email, apiToken)
+		}(user.Email, user.APIToken)
+	}
+
+	wg.Wait()
+}
+
+func listExistingUsers(db fdb.Database) {
 	_, err := db.ReadTransact(func(tr fdb.ReadTransaction) (interface{}, error) {
 		log.Println("\033[1;32mExisting users:\033[0m")
 		kr := tr.GetRange(fdb.KeyRange{Begin: fdb.Key("user_"), End: fdb.Key("user_\xFF")}, fdb.RangeOptions{})
@@ -69,221 +166,236 @@ func main() {
 	if err != nil {
 		log.Fatalf("\033[1;31mError listing users: %v\033[0m", err)
 	}
+}
 
-	// Ask user if they want to create a new user
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("\033[1;32mDo you want to create a new user? (y/n): \033[0m")
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
+func createNewUser(db fdb.Database) {
+	source := rand.NewSource(time.Now().UnixNano())
+	r := rand.New(source)
+	randomNum := r.Intn(100000000)
+	email := fmt.Sprintf("users+%08d@tgopi.com", randomNum) // Using tgopi.com for testing.
+	workspace := "dogcattalk" // Replace with actual workspace name
+	log.Printf("\033[1;36mUsing email: %s for workspace: %s\033[0m", email, workspace)
 
-	if answer == "y" || answer == "yes" {
-		// Set up Slack sign-in
-		source := rand.NewSource(time.Now().UnixNano())
-		r := rand.New(source)
-		randomNum := r.Intn(100000000)
-		email := fmt.Sprintf("users+%08d@tgopi.com", randomNum) // Using tgopi.com for testing.
-		workspace := "dogcattalk" // Replace with actual workspace name
-		log.Printf("\033[1;36mUsing email: %s for workspace: %s\033[0m", email, workspace)
+	// Base URL for Slack API
+	baseURL := fmt.Sprintf("https://%s.slack.com/api", workspace)
 
-		// Base URL for Slack API
-		baseURL := fmt.Sprintf("https://%s.slack.com/api", workspace)
+	// Initialize cookies
+	cookies := make([]*http.Cookie, 0)
 
-		// Initialize cookies
-		cookies := make([]*http.Cookie, 0)
+	cookies = checkEmailAvailability(baseURL, email, cookies)
+	cookies = confirmEmail(baseURL, email, cookies)
+	confirmationCode := waitForVerificationCode(email)
+	cookies = confirmVerificationCode(baseURL, email, confirmationCode, cookies)
 
-		// Check if email is available for signup
-		checkEmailURL := fmt.Sprintf("%s/signup.checkEmail", baseURL)
-		checkEmailData := url.Values{}
-		checkEmailData.Set("email", email)
-		log.Printf("\033[1;33mChecking email availability at: %s\033[0m", checkEmailURL)
-		resp, err := sendRequest(http.MethodPost, checkEmailURL, checkEmailData, cookies)
-		if err != nil {
-			log.Fatalf("\033[1;31mError checking email: %v\033[0m", err)
-		}
-		defer resp.Body.Close()
-		cookies = updateCookies(cookies, resp.Cookies())
-		logResponse("Email check", resp)
+	fullName := generateFullName(randomNum)
 
-		// Confirm email address for signup
-		confirmEmailURL := fmt.Sprintf("%s/signup.confirmEmail", baseURL)
-		confirmEmailData := url.Values{}
-		confirmEmailData.Set("email", email)
-		confirmEmailData.Set("locale", "en-US")
-		log.Printf("\033[1;33mConfirming email at: %s\033[0m", confirmEmailURL)
-		resp, err = sendRequest(http.MethodPost, confirmEmailURL, confirmEmailData, cookies)
-		if err != nil {
-			log.Fatalf("\033[1;31mError confirming email: %v\033[0m", err)
-		}
-		defer resp.Body.Close()
-		cookies = updateCookies(cookies, resp.Cookies())
-		logResponse("Email confirmation", resp)
+	apiToken := createSlackUser(baseURL, fullName, cookies)
 
-		// Wait for verification code
-		log.Printf("\033[1;32mWaiting for verification code for email: %s\033[0m", email)
-		var confirmationCode string
-		for {
-			verificationCodesMutex.Lock()
-			code, exists := verificationCodes[email]
-			if exists {
-				confirmationCode = code
-				delete(verificationCodes, email)
-				verificationCodesMutex.Unlock()
-				break
-			}
-			verificationCodesMutex.Unlock()
-			time.Sleep(1 * time.Second)
-		}
-		log.Printf("\033[1;36mReceived confirmation code: %s\033[0m", confirmationCode)
+	storeUserCredentials(db, email, apiToken)
 
-		// Confirm verification code
-		signInURL := fmt.Sprintf("%s/signin.confirmCode", baseURL)
-		signInData := url.Values{}
-		signInData.Set("email", email)
-		signInData.Set("code", strings.ReplaceAll(confirmationCode, "-", ""))
-		log.Printf("\033[1;33mConfirming code at: %s\033[0m", signInURL)
-		resp, err = sendRequest(http.MethodPost, signInURL, signInData, cookies)
-		if err != nil {
-			log.Fatalf("\033[1;31mError confirming code: %v\033[0m", err)
-		}
-		defer resp.Body.Close()
-		cookies = updateCookies(cookies, resp.Cookies())
-		logResponse("Confirm code", resp)
+	updateProfilePicture(baseURL, apiToken)
 
-		// Check if code confirmation was successful
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatalf("\033[1;31mError reading response body after confirming code: %v\033[0m", err)
-		}
+	sendInitialMessage(baseURL, apiToken)
+}
 
-		log.Printf("\033[1;35mResponse body after confirming code: %s\033[0m", string(body))
-
-		// Generate full name using randommer.io
-		fullName, err := getRandomFullName()
-		if err != nil {
-			log.Printf("\033[1;31mError generating full name: %v\033[0m", err)
-			fullName = fmt.Sprintf("User%08d", randomNum)
-		}
-
-		// Create user using signup.createUser API
-		createUserURL := "https://dogcattalk.slack.com/api/signup.createUser"
-		createUserData := url.Values{}
-		createUserData.Set("code", "")
-		createUserData.Set("display_name", fullName)
-		createUserData.Set("emailok", "true")
-		createUserData.Set("join_type", "shared_invite_confirmed")
-		createUserData.Set("last_tos_acknowledged", "tos_mar2018")
-		createUserData.Set("locale", "en-GB")
-		createUserData.Set("real_name", fullName)
-		createUserData.Set("shared_invite_code", "zt-2rggdrx7r-gPbD08EqfwfhjluP0B4jNQ")
-		createUserData.Set("team", "T07Q4VBFFHP")
-		createUserData.Set("tz", "America/Los_Angeles")
-
-		log.Printf("\033[1;33mCreating user at: %s\033[0m", createUserURL)
-		resp, err = sendRequest(http.MethodPost, createUserURL, createUserData, cookies)
-		if err != nil {
-			log.Fatalf("\033[1;31mError creating user: %v\033[0m", err)
-		}
-		defer resp.Body.Close()
-		cookies = updateCookies(cookies, resp.Cookies())
-		logResponse("Create user", resp)
-
-		body, err = io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatalf("\033[1;31mError reading response body: %v\033[0m", err)
-		}
-
-		log.Printf("\033[1;35mCreate user Response Body: %s\033[0m", string(body))
-
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err != nil {
-			log.Fatalf("\033[1;31mError parsing JSON response: %v\033[0m", err)
-		}
-
-		if result["ok"] == true {
-			log.Println("\033[1;32mUser creation successful!\033[0m")
-
-			// Extract the API token from the response
-			apiToken, ok := result["api_token"].(string)
-			if !ok {
-				log.Fatalf("\033[1;31mFailed to get API token from create user response\033[0m")
-			}
-
-			// Store user credentials in FoundationDB
-			_, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
-				key := fdb.Key(fmt.Sprintf("user_%s", email))
-				value, err := json.Marshal(UserCredential{Email: email, APIToken: apiToken})
-				if err != nil {
-					return nil, err
-				}
-				tr.Set(key, value)
-				return nil, nil
-			})
-			if err != nil {
-				log.Printf("\033[1;31mError storing user credentials: %v\033[0m", err)
-			} else {
-				log.Println("\033[1;32mUser credentials stored successfully\033[0m")
-			}
-
-			// Get profile picture from thispersondoesnotexist.com
-			log.Printf("\033[1;33mGetting profile picture from thispersondoesnotexist.com\033[0m")
-			profilePicResp, err := http.Get("https://thispersondoesnotexist.com")
-			if err != nil {
-				log.Printf("\033[1;31mError getting profile picture: %v\033[0m", err)
-			} else {
-				defer profilePicResp.Body.Close()
-				profilePicData, err := io.ReadAll(profilePicResp.Body)
-				if err != nil {
-					log.Printf("\033[1;31mError reading profile picture data: %v\033[0m", err)
-				} else {
-					// Update profile picture
-					updateProfilePicURL := fmt.Sprintf("%s/users.setPhoto", baseURL)
-					updateProfilePicData := &bytes.Buffer{}
-					writer := multipart.NewWriter(updateProfilePicData)
-					part, err := writer.CreateFormFile("image", "profile.jpg")
-					if err != nil {
-						log.Printf("\033[1;31mError creating form file: %v\033[0m", err)
-					} else {
-						part.Write(profilePicData)
-						writer.WriteField("token", apiToken)
-						writer.Close()
-
-						log.Printf("\033[1;33mUpdating profile picture\033[0m")
-						updateProfilePicResp, err := http.Post(updateProfilePicURL, writer.FormDataContentType(), updateProfilePicData)
-						if err != nil {
-							log.Printf("\033[1;31mError updating profile picture: %v\033[0m", err)
-						} else {
-							defer updateProfilePicResp.Body.Close()
-							logResponse("Update profile picture", updateProfilePicResp)
-						}
-					}
-				}
-			}
-
-			// Send a message to #cats channel
-			sendMessageURL := fmt.Sprintf("%s/chat.postMessage", baseURL)
-			message := "Hello, I'm a new user!"
-			sendMessageData := url.Values{}
-			sendMessageData.Set("token", apiToken)
-			sendMessageData.Set("channel", "cats")
-			sendMessageData.Set("text", message)
-
-			log.Printf("\033[1;33mSending message to #cats channel\033[0m")
-			resp, err = sendRequest(http.MethodPost, sendMessageURL, sendMessageData, cookies)
-			if err != nil {
-				log.Fatalf("\033[1;31mError sending message: %v\033[0m", err)
-			}
-			defer resp.Body.Close()
-			cookies = updateCookies(cookies, resp.Cookies())
-			logResponse("Send message", resp)
-
-		} else {
-			log.Println("\033[1;31mUser creation failed.\033[0m")
-			log.Printf("\033[1;31mError details: %+v\033[0m", result)
-		}
+func checkEmailAvailability(baseURL, email string, cookies []*http.Cookie) []*http.Cookie {
+	checkEmailURL := fmt.Sprintf("%s/signup.checkEmail", baseURL)
+	checkEmailData := url.Values{}
+	checkEmailData.Set("email", email)
+	log.Printf("\033[1;33mChecking email availability at: %s\033[0m", checkEmailURL)
+	resp, err := sendRequest(http.MethodPost, checkEmailURL, checkEmailData, cookies)
+	if err != nil {
+		log.Fatalf("\033[1;31mError checking email: %v\033[0m", err)
 	}
-	// Retrieve all saved users
+	defer resp.Body.Close()
+	cookies = updateCookies(cookies, resp.Cookies())
+	logResponse("Email check", resp)
+	return cookies
+}
+
+func confirmEmail(baseURL, email string, cookies []*http.Cookie) []*http.Cookie {
+	confirmEmailURL := fmt.Sprintf("%s/signup.confirmEmail", baseURL)
+	confirmEmailData := url.Values{}
+	confirmEmailData.Set("email", email)
+	confirmEmailData.Set("locale", "en-US")
+	log.Printf("\033[1;33mConfirming email at: %s\033[0m", confirmEmailURL)
+	resp, err := sendRequest(http.MethodPost, confirmEmailURL, confirmEmailData, cookies)
+	if err != nil {
+		log.Fatalf("\033[1;31mError confirming email: %v\033[0m", err)
+	}
+	defer resp.Body.Close()
+	cookies = updateCookies(cookies, resp.Cookies())
+	logResponse("Email confirmation", resp)
+	return cookies
+}
+
+func waitForVerificationCode(email string) string {
+	log.Printf("\033[1;32mWaiting for verification code for email: %s\033[0m", email)
+	var confirmationCode string
+	for {
+		verificationCodesMutex.Lock()
+		code, exists := verificationCodes[email]
+		if exists {
+			confirmationCode = code
+			delete(verificationCodes, email)
+			verificationCodesMutex.Unlock()
+			break
+		}
+		verificationCodesMutex.Unlock()
+		time.Sleep(1 * time.Second)
+	}
+	log.Printf("\033[1;36mReceived confirmation code: %s\033[0m", confirmationCode)
+	return confirmationCode
+}
+
+func confirmVerificationCode(baseURL, email, confirmationCode string, cookies []*http.Cookie) []*http.Cookie {
+	signInURL := fmt.Sprintf("%s/signin.confirmCode", baseURL)
+	signInData := url.Values{}
+	signInData.Set("email", email)
+	signInData.Set("code", strings.ReplaceAll(confirmationCode, "-", ""))
+	log.Printf("\033[1;33mConfirming code at: %s\033[0m", signInURL)
+	resp, err := sendRequest(http.MethodPost, signInURL, signInData, cookies)
+	if err != nil {
+		log.Fatalf("\033[1;31mError confirming code: %v\033[0m", err)
+	}
+	defer resp.Body.Close()
+	cookies = updateCookies(cookies, resp.Cookies())
+	logResponse("Confirm code", resp)
+	return cookies
+}
+
+func generateFullName(randomNum int) string {
+	fullName, err := getRandomFullName()
+	if err != nil {
+		log.Printf("\033[1;31mError generating full name: %v\033[0m", err)
+		fullName = fmt.Sprintf("User%08d", randomNum)
+	}
+	return fullName
+}
+
+func createSlackUser(baseURL, fullName string, cookies []*http.Cookie) string {
+	createUserURL := "https://dogcattalk.slack.com/api/signup.createUser"
+	createUserData := url.Values{}
+	createUserData.Set("code", "")
+	createUserData.Set("display_name", fullName)
+	createUserData.Set("emailok", "true")
+	createUserData.Set("join_type", "shared_invite_confirmed")
+	createUserData.Set("last_tos_acknowledged", "tos_mar2018")
+	createUserData.Set("locale", "en-GB")
+	createUserData.Set("real_name", fullName)
+	createUserData.Set("shared_invite_code", "zt-2rggdrx7r-gPbD08EqfwfhjluP0B4jNQ")
+	createUserData.Set("team", "T07Q4VBFFHP")
+	createUserData.Set("tz", "America/Los_Angeles")
+
+	log.Printf("\033[1;33mCreating user at: %s\033[0m", createUserURL)
+	resp, err := sendRequest(http.MethodPost, createUserURL, createUserData, cookies)
+	if err != nil {
+		log.Fatalf("\033[1;31mError creating user: %v\033[0m", err)
+	}
+	defer resp.Body.Close()
+	cookies = updateCookies(cookies, resp.Cookies())
+	logResponse("Create user", resp)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("\033[1;31mError reading response body: %v\033[0m", err)
+	}
+
+	log.Printf("\033[1;35mCreate user Response Body: %s\033[0m", string(body))
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Fatalf("\033[1;31mError parsing JSON response: %v\033[0m", err)
+	}
+
+	if result["ok"] == true {
+		log.Println("\033[1;32mUser creation successful!\033[0m")
+		apiToken, ok := result["api_token"].(string)
+		if !ok {
+			log.Fatalf("\033[1;31mFailed to get API token from create user response\033[0m")
+		}
+		return apiToken
+	} else {
+		log.Println("\033[1;31mUser creation failed.\033[0m")
+		log.Printf("\033[1;31mError details: %+v\033[0m", result)
+		return ""
+	}
+}
+
+func storeUserCredentials(db fdb.Database, email, apiToken string) {
+	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
+		key := fdb.Key(fmt.Sprintf("user_%s", email))
+		value, err := json.Marshal(UserCredential{Email: email, APIToken: apiToken})
+		if err != nil {
+			return nil, err
+		}
+		tr.Set(key, value)
+		return nil, nil
+	})
+	if err != nil {
+		log.Printf("\033[1;31mError storing user credentials: %v\033[0m", err)
+	} else {
+		log.Println("\033[1;32mUser credentials stored successfully\033[0m")
+	}
+}
+
+func updateProfilePicture(baseURL, apiToken string) {
+	log.Printf("\033[1;33mGetting profile picture from thispersondoesnotexist.com\033[0m")
+	profilePicResp, err := http.Get("https://thispersondoesnotexist.com")
+	if err != nil {
+		log.Printf("\033[1;31mError getting profile picture: %v\033[0m", err)
+		return
+	}
+	defer profilePicResp.Body.Close()
+	profilePicData, err := io.ReadAll(profilePicResp.Body)
+	if err != nil {
+		log.Printf("\033[1;31mError reading profile picture data: %v\033[0m", err)
+		return
+	}
+
+	updateProfilePicURL := fmt.Sprintf("%s/users.setPhoto", baseURL)
+	updateProfilePicData := &bytes.Buffer{}
+	writer := multipart.NewWriter(updateProfilePicData)
+	part, err := writer.CreateFormFile("image", "profile.jpg")
+	if err != nil {
+		log.Printf("\033[1;31mError creating form file: %v\033[0m", err)
+		return
+	}
+	part.Write(profilePicData)
+	writer.WriteField("token", apiToken)
+	writer.Close()
+
+	log.Printf("\033[1;33mUpdating profile picture\033[0m")
+	updateProfilePicResp, err := http.Post(updateProfilePicURL, writer.FormDataContentType(), updateProfilePicData)
+	if err != nil {
+		log.Printf("\033[1;31mError updating profile picture: %v\033[0m", err)
+		return
+	}
+	defer updateProfilePicResp.Body.Close()
+	logResponse("Update profile picture", updateProfilePicResp)
+}
+
+func sendInitialMessage(baseURL, apiToken string) {
+	sendMessageURL := fmt.Sprintf("%s/chat.postMessage", baseURL)
+	message := "Hello, I'm a new user!"
+	sendMessageData := url.Values{}
+	sendMessageData.Set("token", apiToken)
+	sendMessageData.Set("channel", "cats")
+	sendMessageData.Set("text", message)
+
+	log.Printf("\033[1;33mSending message to #cats channel\033[0m")
+	resp, err := sendRequest(http.MethodPost, sendMessageURL, sendMessageData, nil)
+	if err != nil {
+		log.Printf("\033[1;31mError sending message: %v\033[0m", err)
+		return
+	}
+	defer resp.Body.Close()
+	logResponse("Send message", resp)
+}
+
+func retrieveAllUsers(db fdb.Database) []UserCredential {
 	var users []UserCredential
-	_, err = db.ReadTransact(func(tr fdb.ReadTransaction) (interface{}, error) {
+	_, err := db.ReadTransact(func(tr fdb.ReadTransaction) (interface{}, error) {
 		log.Println("\033[1;32mExisting users:\033[0m")
 		kr := tr.GetRange(fdb.KeyRange{Begin: fdb.Key("user_"), End: fdb.Key("user_\xFF")}, fdb.RangeOptions{})
 		iter := kr.Iterator()
@@ -302,22 +414,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("\033[1;31mError listing users: %v\033[0m", err)
 	}
-
-	var wg sync.WaitGroup
-
-	for _, user := range users {
-		wg.Add(1)
-		go func(email, apiToken string) {
-			defer wg.Done()
-			handleUserMessages(email, apiToken)
-		}(user.Email, user.APIToken)
-	}
-
-	wg.Wait()
+	return users
 }
 
 func helloHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Hello, World!")
+	http.ServeFile(w, r, "index.html")
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
