@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	// "regexp"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
@@ -22,8 +23,9 @@ import (
 )
 
 type UserCredential struct {
-	Email    string
-	APIToken string
+	Email     string
+	APIToken  string
+	Workspace string
 }
 
 type VerificationCode struct {
@@ -32,12 +34,12 @@ type VerificationCode struct {
 }
 
 type SlackInvite struct {
-	Workspace  string `json:"workspace"`
-	InviteCode string `json:"invite_code"`
-	Name       string `json:"name"`
-	Appearance string `json:"appearance"`
-	System     string `json:"system"`
-	Team       string `json:"team"`
+	Workspace   string `json:"workspace"`
+	InviteCode  string `json:"invite_code"`
+	Name        string `json:"name"`
+	Appearance  string `json:"appearance"`
+	System      string `json:"system"`
+	Team        string `json:"team"`
 	PrimaryUser string `json:"user"`
 }
 
@@ -46,7 +48,7 @@ var verificationCodesMutex sync.Mutex
 
 func init() {
 	// Set up logging to file
-	// Use ANSI Colors iliazeus.vscode-ansi 
+	// Use ANSI Colors iliazeus.vscode-ansi
 	// or the "cat app.log.ansi" command to view the colorized logs
 	logFile, err := os.OpenFile("app.log.ansi", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
@@ -68,11 +70,48 @@ func slackInviteHandler(db fdb.Database) http.HandlerFunc {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+		// Check if all mandatory fields are present
+		mandatoryFields := []struct {
+			name  string
+			value string
+		}{
+			{"Workspace", slackInvite.Workspace},
+			{"InviteCode", slackInvite.InviteCode},
+			{"Name", slackInvite.Name},
+			{"Appearance", slackInvite.Appearance},
+			{"System", slackInvite.System},
+			{"Team", slackInvite.Team},
+			{"PrimaryUser", slackInvite.PrimaryUser},
+		}
+
+		for _, field := range mandatoryFields {
+			if field.value == "" {
+				http.Error(w, fmt.Sprintf("Mandatory field '%s' is missing", field.name), http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Log the entire Slack invite object
+		log.Printf("\033[1;34m[INFO]\033[0m Received Slack invite request: %+v\033[0m", slackInvite)
 
 		// Store the invite details in the database
 		_, err = db.Transact(func(tr fdb.Transaction) (interface{}, error) {
 			workspaceKey := fdb.Key(fmt.Sprintf("workspace_%s", slackInvite.Workspace))
-			workspaceData, err := json.Marshal(slackInvite)
+
+			// Create a new struct with only the required fields
+			inviteData := struct {
+				Workspace   string `json:"workspace"`
+				InviteCode  string `json:"invite_code"`
+				Team        string `json:"team"`
+				PrimaryUser string `json:"user"`
+			}{
+				Workspace:   slackInvite.Workspace,
+				InviteCode:  slackInvite.InviteCode,
+				Team:        slackInvite.Team,
+				PrimaryUser: slackInvite.PrimaryUser,
+			}
+
+			workspaceData, err := json.Marshal(inviteData)
 			if err != nil {
 				return nil, fmt.Errorf("error marshaling workspace data: %v", err)
 			}
@@ -87,6 +126,12 @@ func slackInviteHandler(db fdb.Database) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "Slack invite processed and stored successfully for workspace: %s", slackInvite.Workspace)
+
+		// Call createNewUser function
+		email := fmt.Sprintf("users+%08d@tgopi.com", rand.Intn(100000000))
+		createNewUser(db, email, slackInvite.Workspace, slackInvite.InviteCode, slackInvite.Team, slackInvite.Name)
+
+		fmt.Fprintf(w, "New user created successfully for workspace: %s", slackInvite.Workspace)
 	}
 }
 
@@ -153,7 +198,7 @@ func listExistingUsers(db fdb.Database) {
 				log.Printf("\033[1;31mError unmarshaling user: %v\033[0m", err)
 				continue
 			}
-			log.Printf("\033[1;36mEmail: %s, API Token: %s\033[0m", user.Email, user.APIToken)
+			log.Printf("\033[1;36mEmail: %s, API Token: %s, Workspace: %s\033[0m", user.Email, user.APIToken, user.Workspace)
 		}
 		return nil, nil
 	})
@@ -178,7 +223,7 @@ func createNewUser(db fdb.Database, email, workspace, sharedInviteCode, team, fu
 
 	apiToken := createSlackUser(baseURL, fullName, workspace, sharedInviteCode, team, cookies)
 
-	storeUserCredentials(db, email, apiToken)
+	storeUserCredentials(db, email, apiToken, workspace)
 
 	updateProfilePicture(baseURL, apiToken)
 
@@ -262,6 +307,8 @@ func generateFullName(randomNum int) string {
 
 func createSlackUser(baseURL, fullName, workspace, sharedInviteCode, team string, cookies []*http.Cookie) string {
 	createUserURL := fmt.Sprintf("https://%s.slack.com/api/signup.createUser", workspace)
+	log.Printf("\033[1;34mPreparing to create user at URL: %s\033[0m", createUserURL)
+
 	createUserData := url.Values{}
 	createUserData.Set("code", "")
 	createUserData.Set("display_name", fullName)
@@ -274,13 +321,26 @@ func createSlackUser(baseURL, fullName, workspace, sharedInviteCode, team string
 	createUserData.Set("team", team)
 	createUserData.Set("tz", "America/Los_Angeles")
 
-	log.Printf("\033[1;33mCreating user at: %s\033[0m", createUserURL)
+	log.Printf("\033[1;34mUser data prepared:")
+	for key, values := range createUserData {
+		log.Printf("\033[1;34m  %s: %s\033[0m", key, values[0])
+	}
+
+	log.Printf("\033[1;33mSending request to create user at: %s\033[0m", createUserURL)
 	resp, err := sendRequest(http.MethodPost, createUserURL, createUserData, cookies)
 	if err != nil {
-		log.Fatalf("\033[1;31mError creating user: %v\033[0m", err)
+		log.Printf("\033[1;31mError creating user: %v\033[0m", err)
+		log.Fatalf("\033[1;31mFailed to create user. Exiting.\033[0m")
 	}
 	defer resp.Body.Close()
+
+	log.Printf("\033[1;32mReceived response from create user request\033[0m")
+	log.Printf("\033[1;34mResponse status: %s\033[0m", resp.Status)
+
 	cookies = updateCookies(cookies, resp.Cookies())
+	log.Printf("\033[1;34mUpdated cookies after user creation\033[0m")
+
+	log.Printf("\033[1;33mLogging detailed response for user creation:\033[0m")
 	logResponse("Create user", resp)
 
 	body, err := io.ReadAll(resp.Body)
@@ -309,10 +369,10 @@ func createSlackUser(baseURL, fullName, workspace, sharedInviteCode, team string
 	}
 }
 
-func storeUserCredentials(db fdb.Database, email, apiToken string) {
+func storeUserCredentials(db fdb.Database, email, apiToken, workspace string) {
 	_, err := db.Transact(func(tr fdb.Transaction) (interface{}, error) {
 		key := fdb.Key(fmt.Sprintf("user_%s", email))
-		value, err := json.Marshal(UserCredential{Email: email, APIToken: apiToken})
+		value, err := json.Marshal(UserCredential{Email: email, APIToken: apiToken, Workspace: workspace})
 		if err != nil {
 			return nil, err
 		}
@@ -393,7 +453,7 @@ func retrieveAllUsers(db fdb.Database) []UserCredential {
 				log.Printf("\033[1;31mError unmarshaling user: %v\033[0m", err)
 				continue
 			}
-			log.Printf("\033[1;36mEmail: %s, API Token: %s\033[0m", user.Email, user.APIToken)
+			log.Printf("\033[1;36mEmail: %s, API Token: %s, Workspace: %s\033[0m", user.Email, user.APIToken, user.Workspace)
 			users = append(users, user)
 		}
 		return nil, nil

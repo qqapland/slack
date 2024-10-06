@@ -70,6 +70,7 @@
         <div class="debug-field" id="sharedInvite"></div>
     </div>
     <pre id="result"></pre>
+    <pre id="requestObject"></pre>
 
     <script>
         function updateDebugInfo() {
@@ -128,15 +129,16 @@
             const parsedInvite = parseInviteUrl(inviteUrl);
 
             const formData = {
-                invite: inviteUrl,
+                workspace: parsedInvite ? parsedInvite.workspace : '',
+                invite_code: parsedInvite ? parsedInvite.sharedInvite : '',
                 name: document.getElementById('name').value,
                 appearance: document.getElementById('appearance').value,
                 system: document.getElementById('system').value,
                 team: teamId,
-                primaryUser: primaryUserId,
-                workspace: parsedInvite ? parsedInvite.workspace : '',
-                sharedInvite: parsedInvite ? parsedInvite.sharedInvite : ''
+                user: primaryUserId
             };
+
+            document.getElementById('requestObject').textContent = `Request Object: ${JSON.stringify(formData, null, 2)}`;
 
             fetch('/invite', {
                 method: 'POST',
