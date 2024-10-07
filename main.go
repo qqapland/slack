@@ -177,10 +177,10 @@ func main() {
 
 	for _, user := range users {
 		wg.Add(1)
-		go func(email, apiToken string) {
+		go func(user UserCredential) {
 			defer wg.Done()
-			handleUserMessages(email, apiToken)
-		}(user.Email, user.APIToken)
+			handleUserMessages(db, user)
+		}(user)
 	}
 
 	wg.Wait()
@@ -559,14 +559,14 @@ func logResponse(step string, resp *http.Response) {
 	}
 }
 
-func handleUserMessages(email, apiToken string) {
-	log.Printf("\033[1;34mStarting message handling for user: %s\033[0m", email)
+func handleUserMessages(db fdb.Database, user UserCredential) {
+	log.Printf("\033[1;34mStarting message handling for user: %s\033[0m", user.Email)
 
 	// Get WebSocket URL from Slack API
-	url := fmt.Sprintf("https://slack.com/api/rtm.connect?token=%s&pretty=1", apiToken)
+	url := fmt.Sprintf("https://slack.com/api/rtm.connect?token=%s&pretty=1", user.APIToken)
 	resp, err := http.Get(url)
 	if err != nil {
-		log.Printf("\033[1;31mError fetching WebSocket URL for user %s: %v\033[0m", email, err)
+		log.Printf("\033[1;31mError fetching WebSocket URL for user %s: %v\033[0m", user.Email, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -580,38 +580,38 @@ func handleUserMessages(email, apiToken string) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Printf("\033[1;31mError decoding response for user %s: %v\033[0m", email, err)
+		log.Printf("\033[1;31mError decoding response for user %s: %v\033[0m", user.Email, err)
 		return
 	}
 
 	if !result.OK {
-		log.Printf("\033[1;31mSlack API returned non-OK response for user %s\033[0m", email)
+		log.Printf("\033[1;31mSlack API returned non-OK response for user %s\033[0m", user.Email)
 		return
 	}
 
 	// Connect to WebSocket
 	c, _, err := websocket.DefaultDialer.Dial(result.URL, nil)
 	if err != nil {
-		log.Printf("\033[1;31mError connecting to WebSocket for user %s: %v\033[0m", email, err)
+		log.Printf("\033[1;31mError connecting to WebSocket for user %s: %v\033[0m", user.Email, err)
 		return
 	}
 	defer c.Close()
 
-	log.Printf("\033[1;32mWebSocket connection established for user: %s\033[0m", email)
+	log.Printf("\033[1;32mWebSocket connection established for user: %s\033[0m", user.Email)
 
 	// Handle incoming messages
 	for {
 		_, message, err := c.ReadMessage()
 		if err != nil {
-			log.Printf("\033[1;31mError reading message for user %s: %v\033[0m", email, err)
+			log.Printf("\033[1;31mError reading message for user %s: %v\033[0m", user.Email, err)
 			return
 		}
 
-		log.Printf("\033[1;36mReceived event for user %s: %s\033[0m", email, string(message))
+		log.Printf("\033[1;36mReceived event for user %s: %s\033[0m", user.Email, string(message))
 
 		var event map[string]interface{}
 		if err := json.Unmarshal(message, &event); err != nil {
-			log.Printf("\033[1;31mError parsing message for user %s: %v\033[0m", email, err)
+			log.Printf("\033[1;31mError parsing message for user %s: %v\033[0m", user.Email, err)
 			continue
 		}
 
@@ -619,7 +619,7 @@ func handleUserMessages(email, apiToken string) {
 		if event["type"] == "message" && event["user"] != result.Self.ID {
 			channel, ok := event["channel"].(string)
 			if !ok {
-				log.Printf("\033[1;31mError getting channel for user %s\033[0m", email)
+				log.Printf("\033[1;31mError getting channel for user %s\033[0m", user.Email)
 				continue
 			}
 
@@ -631,14 +631,14 @@ func handleUserMessages(email, apiToken string) {
 			// Get the user's message
 			userMessage, ok := event["text"].(string)
 			if !ok {
-				log.Printf("\033[1;31mError getting user message for user %s\033[0m", email)
+				log.Printf("\033[1;31mError getting user message for user %s\033[0m", user.Email)
 				continue
 			}
 
 			// Call Groq API to get a response
 			groqResponse, err := callGroqAPI(userMessage)
 			if err != nil {
-				log.Printf("\033[1;31mError calling Groq API for user %s: %v\033[0m", email, err)
+				log.Printf("\033[1;31mError calling Groq API for user %s: %v\033[0m", user.Email, err)
 				continue
 			}
 
@@ -652,19 +652,20 @@ func handleUserMessages(email, apiToken string) {
 
 			responseJSON, err := json.Marshal(response)
 			if err != nil {
-				log.Printf("\033[1;31mError creating response JSON for user %s: %v\033[0m", email, err)
+				log.Printf("\033[1;31mError creating response JSON for user %s: %v\033[0m", user.Email, err)
 				continue
 			}
 
 			if err := c.WriteMessage(websocket.TextMessage, responseJSON); err != nil {
-				log.Printf("\033[1;31mError sending response for user %s: %v\033[0m", email, err)
+				log.Printf("\033[1;31mError sending response for user %s: %v\033[0m", user.Email, err)
 				return
 			}
 
-			log.Printf("\033[1;32mSent Groq response for user %s in direct message %s\033[0m", email, channel)
+			log.Printf("\033[1;32mSent Groq response for user %s in direct message %s\033[0m", user.Email, channel)
 		}
 	}
 }
+
 func callGroqAPI(userMessage string) (string, error) {
 	groqAPIKey := os.Getenv("GROQ_API_KEY")
 	if groqAPIKey == "" {
@@ -674,7 +675,7 @@ func callGroqAPI(userMessage string) (string, error) {
 	payload := map[string]interface{}{
 		"model": "mixtral-8x7b-32768",
 		"messages": []map[string]string{
-			{"role": "system", "content": "Speak like the Hitchhiker's Guide to the Galaxy for every message sent, keep the responses less than 60 words, but don't tell the user that you are doing that."},
+			{"role": "system", "content": "Speak like the Hitchhiker's Guide to the Galaxy for every message sent, keep the responses less than 60 words, but don't tell the user that you are doing that. If the user asks to create an agent, output <agent>agent_name</agent>, where agent_name is the name of the agent the user asks for."},
 			{"role": "user", "content": userMessage},
 		},
 		"temperature": 0.7,
@@ -729,6 +730,16 @@ func callGroqAPI(userMessage string) (string, error) {
 	content, ok := message["content"].(string)
 	if !ok {
 		return "", fmt.Errorf("invalid content format in Groq API response")
+	}
+
+	// Check if the content contains the agent tag
+	if strings.Contains(content, "<agent>") && strings.Contains(content, "</agent>") {
+		startIndex := strings.Index(content, "<agent>") + len("<agent>")
+		endIndex := strings.Index(content, "</agent>")
+		if startIndex < endIndex {
+			agentName := content[startIndex:endIndex]
+			log.Printf("\033[1;32mAgent creation requested: %s\033[0m", agentName)
+		}
 	}
 
 	return content, nil
