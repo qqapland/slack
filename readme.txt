@@ -1,3 +1,10 @@
+to setup:
+- setup foundationdb using the install_fdb_go script, and random info below
+- setup caddy to serve the go server (go run main.go) with https://<server> which provides the main page as well as the /webhook endpoint
+- setup cloudflare email worker (worker.js) to call a https://<server>/webhook endpoint with the verification code
+
+----- random info below -----
+
 go run main.go
 
 todo?
